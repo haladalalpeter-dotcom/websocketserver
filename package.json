@@ -1,13 +1,14 @@
-
-  "name": "ws-counter",
+{
+  "name": "websocket-counter",
   "version": "1.0.0",
+  "description": "Personal counter WebSocket server",
   "main": "server.js",
   "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "ws": "^8.13.0"
-  },
-  "scripts": {
-    "start": "node server.js"
   }
 }
