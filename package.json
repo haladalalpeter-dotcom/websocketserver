@@ -1,11 +1,13 @@
-{
+
+  "name": "ws-counter",
+  "version": "1.0.0",
+  "main": "server.js",
   "type": "module",
-  "scripts": {
-    "start": "node server.js"
-  },
   "dependencies": {
     "express": "^4.18.2",
-    "ws": "^8.16.0"
+    "ws": "^8.13.0"
+  },
+  "scripts": {
+    "start": "node server.js"
   }
-
 }
