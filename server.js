@@ -1,51 +1,62 @@
 import express from "express";
 import http from "http";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import Database from "better-sqlite3";
 import { WebSocketServer } from "ws";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const DATA_FILE = path.join(__dirname, "data.json");
-
+// =======================
+// App & Server
+// =======================
 const app = express();
-app.use(cors());
 app.use(express.json());
-
-// ===== تحميل البيانات =====
-let counters = {};
-try {
-  if (fs.existsSync(DATA_FILE)) {
-    counters = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  }
-} catch (e) {
-  console.error("❌ Failed to load data.json");
-  counters = {};
-}
-
-// ===== حفظ البيانات =====
-function saveData() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(counters, null, 2));
-}
-
-// health check
-app.get("/", (req, res) => {
-  res.send("WS OK");
-});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// WebSocket connections لكل مستخدم
-const userConnections = {};
+// =======================
+// Database (SQLite)
+// =======================
+const db = new Database("db.sqlite");
 
-// ===== WebSocket =====
+// create table if not exists
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS counters (
+    userId TEXT PRIMARY KEY,
+    count INTEGER NOT NULL
+  )
+`).run();
+
+// helpers
+function getCount(userId) {
+  const row = db.prepare(
+    "SELECT count FROM counters WHERE userId = ?"
+  ).get(userId);
+  return row ? row.count : 0;
+}
+
+function incrementCount(userId) {
+  const exists = db.prepare(
+    "SELECT 1 FROM counters WHERE userId = ?"
+  ).get(userId);
+
+  if (exists) {
+    db.prepare(
+      "UPDATE counters SET count = count + 1 WHERE userId = ?"
+    ).run(userId);
+  } else {
+    db.prepare(
+      "INSERT INTO counters (userId, count) VALUES (?, 1)"
+    ).run(userId);
+  }
+
+  return getCount(userId);
+}
+
+// =======================
+// WebSocket connections
+// =======================
+const connections = {}; // userId -> Set(ws)
+
 wss.on("connection", (ws) => {
-  console.log("🟢 client connected");
-
   ws.on("message", (msg) => {
     let data;
     try {
@@ -58,62 +69,64 @@ wss.on("connection", (ws) => {
       const userId = String(data.userId);
       ws.userId = userId;
 
-      if (!userConnections[userId]) {
-        userConnections[userId] = [];
+      if (!connections[userId]) {
+        connections[userId] = new Set();
       }
-      userConnections[userId].push(ws);
+      connections[userId].add(ws);
 
+      // send current count
       ws.send(JSON.stringify({
         type: "count",
-        value: counters[userId] || 0
+        value: getCount(userId)
       }));
     }
   });
 
   ws.on("close", () => {
-    if (ws.userId && userConnections[ws.userId]) {
-      userConnections[ws.userId] =
-        userConnections[ws.userId].filter(c => c !== ws);
-
-      if (userConnections[ws.userId].length === 0) {
-        delete userConnections[ws.userId];
+    if (ws.userId && connections[ws.userId]) {
+      connections[ws.userId].delete(ws);
+      if (connections[ws.userId].size === 0) {
+        delete connections[ws.userId];
       }
     }
   });
 });
 
-// ===== HTTP increment =====
+// =======================
+// HTTP endpoint (increment)
+// =======================
 app.get("/open", (req, res) => {
   const userId = req.query.id;
   if (!userId) {
     return res.status(400).json({ error: "missing id" });
   }
 
-  const uid = String(userId);
+  const count = incrementCount(String(userId));
 
-  if (!counters[uid]) counters[uid] = 0;
-  counters[uid]++;
-
-  // حفظ دائم
-  saveData();
-
-  // بث التحديث
-  if (userConnections[uid]) {
-    userConnections[uid].forEach(ws => {
+  // notify only this user
+  if (connections[userId]) {
+    connections[userId].forEach(ws => {
       if (ws.readyState === ws.OPEN) {
         ws.send(JSON.stringify({
           type: "count",
-          value: counters[uid]
+          value: count
         }));
       }
     });
   }
 
-  res.json({ ok: true, count: counters[uid] });
+  res.json({ ok: true, count });
 });
 
-// ===== PORT =====
+// =======================
+// Health
+// =======================
+app.get("/", (_, res) => res.send("WS + DB OK"));
+
+// =======================
+// Render PORT
+// =======================
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("🚀 running on port", PORT);
+  console.log("🚀 running on", PORT);
 });
