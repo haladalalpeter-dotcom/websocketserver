@@ -1,61 +1,65 @@
 import express from "express";
 import http from "http";
+import cors from "cors";
 import Database from "better-sqlite3";
 import { WebSocketServer } from "ws";
 
-// =======================
-// App & Server
-// =======================
 const app = express();
+app.use(cors());
 app.use(express.json());
 
+/* ======================
+   HTTP + WS SERVER
+====================== */
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// =======================
-// Database (SQLite)
-// =======================
-const db = new Database("db.sqlite");
+/* ======================
+   DATABASE (SQLite)
+====================== */
+const db = new Database("data.db");
 
-// create table if not exists
+// جدول واحد للحملات
 db.prepare(`
   CREATE TABLE IF NOT EXISTS counters (
-    userId TEXT PRIMARY KEY,
-    count INTEGER NOT NULL
+    campaign TEXT,
+    userId TEXT,
+    count INTEGER,
+    PRIMARY KEY (campaign, userId)
   )
 `).run();
 
-// helpers
-function getCount(userId) {
+/* ======================
+   HELPERS
+====================== */
+function getCount(campaign, userId) {
   const row = db.prepare(
-    "SELECT count FROM counters WHERE userId = ?"
-  ).get(userId);
+    "SELECT count FROM counters WHERE campaign = ? AND userId = ?"
+  ).get(campaign, userId);
   return row ? row.count : 0;
 }
 
-function incrementCount(userId) {
-  const exists = db.prepare(
-    "SELECT 1 FROM counters WHERE userId = ?"
-  ).get(userId);
+function incrementCount(campaign, userId) {
+  const existing = db.prepare(
+    "SELECT count FROM counters WHERE campaign = ? AND userId = ?"
+  ).get(campaign, userId);
 
-  if (exists) {
+  if (existing) {
     db.prepare(
-      "UPDATE counters SET count = count + 1 WHERE userId = ?"
-    ).run(userId);
+      "UPDATE counters SET count = count + 1 WHERE campaign = ? AND userId = ?"
+    ).run(campaign, userId);
   } else {
     db.prepare(
-      "INSERT INTO counters (userId, count) VALUES (?, 1)"
-    ).run(userId);
+      "INSERT INTO counters (campaign, userId, count) VALUES (?, ?, 1)"
+    ).run(campaign, userId);
   }
 
-  return getCount(userId);
+  return getCount(campaign, userId);
 }
 
-// =======================
-// WebSocket connections
-// =======================
-const connections = {}; // userId -> Set(ws)
-
+/* ======================
+   WEBSOCKET
+====================== */
 wss.on("connection", (ws) => {
   ws.on("message", (msg) => {
     let data;
@@ -65,68 +69,58 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (data.type === "register" && data.userId) {
-      const userId = String(data.userId);
-      ws.userId = userId;
+    if (data.type === "register" && data.campaign && data.userId) {
+      ws.campaign = data.campaign;
+      ws.userId = data.userId;
 
-      if (!connections[userId]) {
-        connections[userId] = new Set();
-      }
-      connections[userId].add(ws);
-
-      // send current count
+      const count = getCount(ws.campaign, ws.userId);
       ws.send(JSON.stringify({
         type: "count",
-        value: getCount(userId)
+        value: count
+      }));
+    }
+  });
+});
+
+/* ======================
+   INCREMENT ENDPOINT
+====================== */
+app.get("/open", (req, res) => {
+  const { campaign, id } = req.query;
+  if (!campaign || !id) {
+    return res.status(400).json({ error: "missing campaign or id" });
+  }
+
+  const count = incrementCount(campaign, id);
+
+  // بث التحديث
+  wss.clients.forEach(client => {
+    if (
+      client.readyState === 1 &&
+      client.campaign === campaign &&
+      client.userId === id
+    ) {
+      client.send(JSON.stringify({
+        type: "count",
+        value: count
       }));
     }
   });
 
-  ws.on("close", () => {
-    if (ws.userId && connections[ws.userId]) {
-      connections[ws.userId].delete(ws);
-      if (connections[ws.userId].size === 0) {
-        delete connections[ws.userId];
-      }
-    }
-  });
-});
-
-// =======================
-// HTTP endpoint (increment)
-// =======================
-app.get("/open", (req, res) => {
-  const userId = req.query.id;
-  if (!userId) {
-    return res.status(400).json({ error: "missing id" });
-  }
-
-  const count = incrementCount(String(userId));
-
-  // notify only this user
-  if (connections[userId]) {
-    connections[userId].forEach(ws => {
-      if (ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify({
-          type: "count",
-          value: count
-        }));
-      }
-    });
-  }
-
   res.json({ ok: true, count });
 });
 
-// =======================
-// Health
-// =======================
-app.get("/", (_, res) => res.send("WS + DB OK"));
+/* ======================
+   HEALTH
+====================== */
+app.get("/", (_, res) => {
+  res.send("WS + Campaign OK");
+});
 
-// =======================
-// Render PORT
-// =======================
+/* ======================
+   START
+====================== */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log("🚀 running on", PORT);
+  console.log("🚀 Server running on", PORT);
 });
